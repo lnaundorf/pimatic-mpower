@@ -1,0 +1,27 @@
+{ "name": "pimatic-plugin-template",
+  "description": "A pimatic plugin for controlling Ubiquiti mFi controllable power outlets (mPower)",
+  "author": "Leif Naundorf <kontakt@leifnaundorf.de>",
+  "main": "mpower",
+  "files": [
+    "mpower.coffee",
+    "README.md",
+    "mpower-config-schema.coffee"
+  ],
+  "version": "0.8.0",
+  "homepage": "https://github.com/lnaundorf/pimatic-mpower",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/lnaundorf/pimatic-mpower.git"
+  },
+  "configSchema": "mpower-config-schema.coffee",
+  "dependencies": {
+  },
+  "peerDependencies": {
+    "pimatic": "0.8.*"
+  },
+  "engines": {
+    "node": ">0.8.x",
+    "npm": ">1.1.x"
+  }
+}
