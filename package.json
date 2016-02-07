@@ -16,6 +16,7 @@
   },
   "configSchema": "mpower-config-schema.coffee",
   "dependencies": {
+    "request-promise": ">=2.0.0"
   },
   "peerDependencies": {
     "pimatic": "0.8.*"
