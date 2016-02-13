@@ -60,6 +60,8 @@ module.exports = (env) ->
       if not dev
         newHost = {
           ports: {}
+          authenticated: false
+          cookie: null
         }
         @switchDevices[port.host] = newHost
 
@@ -98,6 +100,7 @@ module.exports = (env) ->
           resolve()
         ).catch( (error) =>
           env.logger.error("Error while updating the state to #{state}: #{error}")
+          @switchDevices[host].authenticated = false
         )
       )
 
@@ -110,15 +113,15 @@ module.exports = (env) ->
             @_updateHost(host, data) 
 
     _updateHost: (host, data) ->
-      env.logger.debug("Updating host: #{host}")
+      env.logger.debug("Updating host: #{host}, authenticated: #{data.authenticated}")
       new Promise( =>
         @_getSessionId(host, data)
           .then(@_login(host, data))
-          .then( => data.authenticated = true)
+          .then(data.authenticated = true)
           .then(@_updateSensorData(host, data))
           .catch( (error) =>
-            host.authenticated = false
-            env.logger.error("Error: #{error}")
+            data.authenticated = false
+            env.logger.error("Error while updating host: #{error}")
           )
       )
 
@@ -143,8 +146,8 @@ module.exports = (env) ->
       return "11111111111111111111111111111111"
 
     _login: (host, data) ->
-      env.logger.debug("Login, host: #{host}, cookie: #{data.cookie}")
       if not data.authenticated
+        env.logger.debug("Login, host: #{host}, cookie: #{data.cookie}")
         request.post(
           url: "http://#{host}/login.cgi"
           form:
