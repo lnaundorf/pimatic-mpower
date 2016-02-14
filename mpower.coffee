@@ -41,11 +41,8 @@ module.exports = (env) ->
     init: (app, @framework, @config) =>
       @username = @config.username
       @password = @config.password
-      @useWebSockets = @config.useWebSockets
 
       @switchDevices = {}
-
-      @interval = @config.interval
 
       deviceConfigDef = require("./device-config-schema")
 
@@ -54,18 +51,17 @@ module.exports = (env) ->
         createCallback: (config) => new MPowerSwitch(config, @)
       })
 
-      setInterval(( => @update()
-      ), @interval * 1000)
 
     addPort: (port) ->
       env.logger.debug("Add port: #{port.host} --> #{port.portNumber}")
+      newDevice = false
       dev = @switchDevices[port.host]
       if not dev
-        cookie = @_generateSessionId()
+        newDevice = true
         newHost = {
           ports: {}
-          cookie: cookie
-          authenticated: false
+          cookie: null
+          ws: null
         }
 
         @switchDevices[port.host] = newHost
@@ -75,99 +71,62 @@ module.exports = (env) ->
         device: port.device
       }
 
-    createWebSocket: (host, cookie) ->
+      if newDevice
+        @_initSwitchDevice(port.host)
+
+    createWebSocket: (host, data) =>
       env.logger.debug("Creating WebSocket for host #{host}")
-      ws = new W3CWebSocket("ws://#{host}:7681/?c=#{cookie}", "mfi-protocol")
+      ws = new W3CWebSocket("ws://#{host}:7681/?c=#{data.cookie}", "mfi-protocol")
       ws.onopen = () ->
         ws.send(JSON.stringify({
           time: 10
         }))
-      ws.onmessage = (msg) -> env.logger.debug("WS message for #{host}: #{JSON.stringify(JSON.parse(msg.data), null, 2)}")
+      ws.onmessage = (msg) => @_updateSensorData(host, msg)
       ws.onclose = () -> env.logger.debug("WS closed for #{host}.")
 
-      return ws
+      data.ws = ws
 
     getData: (host, portNumber, attribute) ->
       new Promise( (resolve) =>
         if @switchDevices[host]?
           if @switchDevices[host][portNumber]?
-            if @switchDevices[host][portNumber]["data"][attribute]?
-              resolve(@switchDevices[host][portNumber]["data"][attribute])
+            if @switchDevices[host][portNumber].data[attribute]?
+              resolve(@switchDevices[host][portNumber].data[attribute])
 
         resolve(0)
       )
 
-    _getChangeStateFunction: (host, portNumber, state) ->
-      if @useWebSockets
-        return new Promise ( (resolve) =>
-          ws = @switchDevices[host].ws
-          update = {
-            sensors: [
-              {
-                output: if state then 1 else 0
-                port: portNumber
-              }
-            ]
-          }
-          env.logger.debug("Sending WebSeocket message to #{host}: #{JSON.stringify(update, null, 2)}")
-          ws.send(JSON.stringify(update))
-          resolve()
-        )
-      else
-        return request.post(
-          url: "http://#{host}/sensors/#{portNumber}"
-          form:
-            output: if state then "1" else "0"
-          headers:
-            Cookie: @switchDevices[host].cookie
-          followRedirect: false
-          simple: false
-        )
-
     changeStateTo: (host, portNumber, state) ->
-      new Promise((resolve) =>
-        Promise.resolve(
-          @_getChangeStateFunction(host, portNumber, state)
-        ).then( =>
-          portDevice = @switchDevices[host][portNumber]
+      new Promise((resolve, reject) =>
+        ws = @switchDevices[host].ws
 
-          if portDevice?
-            portDevice["data"].output = if state then 1 else 0
-            portDevice["device"].emit("state", state)
+        if not ws?
+          env.logger.error("No WebSocket available.")
+          reject()
 
-          resolve()
-        ).catch( (error) =>
-          env.logger.error("Error while updating the state to #{state}: #{error}")
-          @switchDevices[host].cookie = null
-        )
-      )
+        update = {
+          sensors: [
+            {
+              output: if state then 1 else 0
+              port: portNumber
+            }
+          ]
+        }
+        env.logger.debug("Sending WebSocket message to #{host}: #{JSON.stringify(update, null, 2)}")
+        ws.send(JSON.stringify(update))
 
+        portDevice = @switchDevices[host][portNumber]
 
-    update: () -> Promise.all(@_updateHost(host, data) for host, data of @switchDevices)
+        if portDevice?
+          portDevice.data.output = if state then 1 else 0
+          portDevice.device.emit("state", state)
 
-    _updateHost: (host, data) ->
-      env.logger.debug("Updating host: #{host}")
-      new Promise( (resolve) =>
-        @_getSessionId(host, data)
-          .then(@_login(host, data))
-          .then(@_updateSensorData(host, data))
-          .catch( (error) =>
-            data.cookie = null
-            env.logger.error("Error while updating host: #{error}")
-          )
         resolve()
-      )
-
-    
-    _getSessionId: (host, data) ->
-      new Promise( =>
-        env.logger.debug("_getSessionId Host: #{host}")
-        if not data.cookie?
-          data.cookie = @_generateSessionId()
-          data.authenticated = false
-          env.logger.debug("Generated cookie for #{host}: #{data.cookie}")
-        else
-          env.logger.debug("Cookie for host #{host} already generated: #{data.cookie}")
+      ).catch( (error) =>
+        env.logger.error("Error while updating the state to #{state}: #{error}")
+        # create new cookie and try again to login
+        @_initSwitchDevice(host)
+        reject()
       )
 
     _generateSessionId: () ->
@@ -180,71 +139,51 @@ module.exports = (env) ->
 
       return text
 
-    _login: (host, data) ->
-      new Promise( (resolve) =>
-        if not data.authenticated
-          env.logger.debug("Login, host: #{host}, cookie: #{data.cookie}")
-          request.post(
-            url: "http://#{host}/login.cgi"
-            form:
-              username: @username
-              password: @password
-            headers:
-              Cookie: "AIROS_SESSIONID=#{data.cookie}"
-            followRedirect: false
-            simple: false
-          ).then( =>
-            env.logger.debug("Login successful for host #{host}.")
-            data.authenticated = true
-            if @useWebSockets
-              data.ws = @createWebSocket(host, data.cookie)
+    _initSwitchDevice: (host) ->
+      data = @switchDevices[host]
+      return new Promise( (resolve, reject) =>
+        data.cookie = @_generateSessionId()
+        env.logger.debug("Login, host: #{host}, cookie: #{data.cookie}")
+        request.post(
+          url: "http://#{host}/login.cgi"
+          form:
+            username: @username
+            password: @password
+          headers:
+            Cookie: "AIROS_SESSIONID=#{data.cookie}"
+          followRedirect: false
+          simple: false
+        ).then( =>
+          env.logger.debug("Login successful for host #{host}.")
+          @createWebSocket(host, data)
 
-            resolve()
-          ).catch( (error) =>
-            env.logger.error("Error while logging in: #{error}")
-          )
-        else
-          env.logger.debug("Already authenticated for host #{host}, skipping login.")
           resolve()
+        ).catch( (error) =>
+          env.logger.error("Error while logging in for #{host}: #{error}")
+          reject()
+        )
       )
 
-    _updateSensorData: (host, data) ->
-      env.logger.debug("Update sensor data, host: #{host}, cookie: #{data.cookie}")
-      request.get(
-        url: "http://#{host}/sensors"
-        headers:
-          Cookie: "AIROS_SESSIONID=#{data.cookie}"
-        followRedirect: false
-        simple: false
-      )
-      .then(JSON.parse)
-      .then( (jsonData) =>
-        #env.logger.debug("Got sensor data for #{host}: #{JSON.stringify(jsonData, null, 2)}")
+    _updateSensorData: (host, webSocketMessage) ->
+      data = @switchDevices[host]
+      jsonData = JSON.parse(webSocketMessage.data)
+      #env.logger.debug("Update sensor data for #{host}, message: #{JSON.stringify(jsonData, null, 2)}")
 
-        for portData in jsonData.sensors
-          #env.logger.debug("Port data: #{JSON.stringify(portData, null, 2)}")
-          if data.ports[portData.port]?
-            data.ports[portData.port]["data"] = portData
+      for portData in jsonData.sensors
+        if data.ports[portData.port]?
+          data.ports[portData.port].data = portData
 
-            # emit the new data to the framework
-            device = data.ports[portData.port]["device"]
+          # emit the new data to the framework
+          device = data.ports[portData.port].device
 
-            if device?
-              # The "output" attribute should be mapped to the "state" attribute
-              device.emit("state", portData.output)
-              device.emit("power", portData.power)
-              device.emit("enabled", portData.enabled)
-              device.emit("current", portData.current)
-              device.emit("voltage", portData.voltage)
-              device.emit("powerfactor", portData.powerfactor)
-              device.emit("relay", portData.relay)
-              device.emit("lock", portData.lock)
-              device.emit("thismonth", portData.thismonth)
-              device.emit("lastmonth", portData.lastmonth)
-      )
-      .catch( (error) =>
-        env.logger.error("Error while updating sensor data: #{error}")
-      )
+          if device?
+            # The "output" attribute should be mapped to the "state" attribute
+            device.emit("state", portData.output)
+            device.emit("power", portData.power)
+            device.emit("current", portData.current)
+            device.emit("voltage", portData.voltage)
+            device.emit("powerfactor", portData.powerfactor)
+            device.emit("energy", portData.energy)
 
   class MPowerSwitch extends env.devices.PowerSwitch
   
@@ -271,9 +210,6 @@ module.exports = (env) ->
         description: "The current power usage in watts"
         type: "number"
         unit: "W"
-      enabled:
-        description: "TODO: enabled"
-        type: "boolean"
       current:
         description: "The current in amps"
         type: "number"
@@ -285,20 +221,9 @@ module.exports = (env) ->
       powerfactor:
         description: "The power factor"
         type: "number"
-      relay:
-        description: "TODO: relay"
-        type: "boolean"
-      lock:
-        description: "TODO: lock"
-        type: "boolean"
-      thismonth:
-        description: "The total power usage this month in kWh"
+      energy:
+        description: "The energy"
         type: "number"
-        unit: "kWh"
-      lastmonth:
-        description: "The total power usage last month in kWh"
-        type: "number"
-        unit: "kWh"
 
     getTemplate: -> Promise.resolve(@template)
 
@@ -306,21 +231,13 @@ module.exports = (env) ->
 
     getPower: -> @plugin.getData(@host, @portNumber, "power")
 
-    getEnabled: -> @plugin.getData(@host, @portNumber, "enabled")
-
     getCurrent: -> @plugin.getData(@host, @portNumber, "current")
 
     getVoltage: -> @plugin.getData(@host, @portNumber, "voltage")
 
     getPowerfactor: -> @plugin.getData(@host, @portNumber, "powerfactor")
 
-    getRelay: -> @plugin.getData(@host, @portNumber, "relay")
-
-    getLock: -> @plugin.getData(@host, @portNumber, "lock")
-
-    getThismonth: -> @plugin.getData(@host, @portNumber, "thismonth")
-
-    getLastmonth: -> @plugin.getData(@host, @portNumber, "lastmonth")
+    getEnergy: -> @plugin.getData(@host, @portNumber, "energy")
 
     changeStateTo: (state) -> @plugin.changeStateTo(@host, @portNumber, state)
 
