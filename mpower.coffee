@@ -204,6 +204,7 @@ module.exports = (env) ->
       @id = @config.id
       @host = @config.host
       @portNumber = @config.portNumber
+      @template = if @config.hideSwitch then "device" else "switch"
 
       @plugin.addPort {
         host: @host
@@ -249,6 +250,8 @@ module.exports = (env) ->
         description: "The total power usage last month in kWh"
         type: "number"
         unit: "kWh"
+
+    getTemplate: -> Promise.resolve(@template)
 
     getState: -> @plugin.getData(@host, @portNumber, "output")
 

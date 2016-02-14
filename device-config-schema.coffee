@@ -11,12 +11,8 @@ module.exports ={
       portNumber:
         description: "The port number of the mPower device"
         type: "number"
-      username:
-        description: "The username for login"
-        type: "string"
-        default: "ubnt"
-      password:
-        description: "The password for login"
-        type: "string"
-        default: "ubnt"
+      hideSwitch:
+        description: "If the switch should be hidden in the GUI"
+        type: "boolean"
+        default: false
 }
