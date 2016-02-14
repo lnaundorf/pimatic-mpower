@@ -105,37 +105,36 @@ module.exports = (env) ->
     getData: (host, portNumber, attribute) ->
       new Promise( (resolve) =>
         if @switchDevices[host]?
-          if @switchDevices[host][portNumber]?
-            if @switchDevices[host][portNumber].data[attribute]?
-              resolve(@switchDevices[host][portNumber].data[attribute])
+          if @switchDevices[host].ports[portNumber]?
+            if @switchDevices[host].ports[portNumber].data[attribute]?
+              resolve(@switchDevices[host].ports[portNumber].data[attribute])
 
         resolve(0)
       )
 
     changeStateTo: (host, portNumber, state) ->
-      new Promise((resolve, reject) =>
+      new Promise((resolve) =>
         ws = @switchDevices[host].ws
 
         if not ws?
-          env.logger.error("No WebSocket available.")
-          reject()
+          env.logger.error("No WebSocket available for #{host}.")
+        else
+          update = {
+            sensors: [
+              {
+                output: if state then 1 else 0
+                port: portNumber
+              }
+            ]
+          }
+          env.logger.debug("Sending WebSocket message to #{host}: #{JSON.stringify(update, null, 2)}")
+          ws.send(JSON.stringify(update))
 
-        update = {
-          sensors: [
-            {
-              output: if state then 1 else 0
-              port: portNumber
-            }
-          ]
-        }
-        env.logger.debug("Sending WebSocket message to #{host}: #{JSON.stringify(update, null, 2)}")
-        ws.send(JSON.stringify(update))
+          portDevice = @switchDevices[host][portNumber]
 
-        portDevice = @switchDevices[host][portNumber]
-
-        if portDevice?
-          portDevice.data.output = if state then 1 else 0
-          portDevice.device.emit("state", state)
+          if portDevice?
+            portDevice.data.output = if state then 1 else 0
+            portDevice.device.emit("state", state)
 
         resolve()
       ).catch( (error) =>
