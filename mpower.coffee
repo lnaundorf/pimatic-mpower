@@ -48,7 +48,7 @@ module.exports = (env) ->
 
       @framework.deviceManager.registerDeviceClass("MPowerSwitch", {
         configDef: deviceConfigDef.MPowerSwitch,
-        createCallback: (config) => new MPowerSwitch(config, @)
+        createCallback: (config, lastState) => new MPowerSwitch(config, @, lastState)
       })
 
 
@@ -71,8 +71,24 @@ module.exports = (env) ->
         device: port.device
       }
 
+      if port.lastState?
+        @_restoreLastState(port.host, port.portNumber, port.lastState)
+        #env.logger.debug("Data: #{JSON.stringify(@switchDevices[port.host].ports[port.portNumber].data, null, 2)}")
+
       if newDevice
         @_initSwitchDevice(port.host)
+
+    _restoreLastState: (host, portNumber, lastState) =>
+      #env.logger.debug("Restore last state of #{host}, port #{portNumber}: #{JSON.stringify(lastState, null, 2)}")
+
+      port = @switchDevices[host].ports[portNumber]
+
+      for property, state of lastState
+        # Only use data if it is not older than 1 hour
+        if Date.now() - state.time <= 1 * 3600 * 1000
+          port.data[property] = state.value
+          port.device.emit(property, state.value)
+
 
     createWebSocket: (host, data) =>
       env.logger.debug("Creating WebSocket for host #{host}")
@@ -198,6 +214,7 @@ module.exports = (env) ->
         host: @host
         portNumber: @portNumber
         device: @
+        lastState: lastState
       }
       super()
 
