@@ -17,4 +17,8 @@ module.exports = {
       description: "The password for login"
       type: "string"
       default: "ubnt"
+    useWebSockets:
+      description: "Whether to use the faster (but unsupported) WebSocket mPower API"
+      type: "boolean"
+      default: true
 }

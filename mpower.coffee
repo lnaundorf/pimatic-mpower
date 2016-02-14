@@ -22,6 +22,8 @@ module.exports = (env) ->
 
   request = require 'request-promise'
 
+  W3CWebSocket = require('websocket').w3cwebsocket
+
   # ###MyPlugin class
   # Create a class that extends the Plugin class and implements the following functions:
   class MPowerPlugin extends env.plugins.Plugin
@@ -39,6 +41,7 @@ module.exports = (env) ->
     init: (app, @framework, @config) =>
       @username = @config.username
       @password = @config.password
+      @useWebSockets = @config.useWebSockets
 
       @switchDevices = {}
 
@@ -58,11 +61,13 @@ module.exports = (env) ->
       env.logger.debug("Add port: #{port.host} --> #{port.portNumber}")
       dev = @switchDevices[port.host]
       if not dev
+        cookie = @_generateSessionId()
         newHost = {
           ports: {}
+          cookie: cookie
           authenticated: false
-          cookie: null
         }
+
         @switchDevices[port.host] = newHost
 
       @switchDevices[port.host].ports[port.portNumber] = {
@@ -70,19 +75,46 @@ module.exports = (env) ->
         device: port.device
       }
 
+    createWebSocket: (host, cookie) ->
+      env.logger.debug("Creating WebSocket for host #{host}")
+      ws = new W3CWebSocket("ws://#{host}:7681/?c=#{cookie}", "mfi-protocol")
+      ws.onopen = () ->
+        ws.send(JSON.stringify({
+          time: 10
+        }))
+      ws.onmessage = (msg) -> env.logger.debug("WS message for #{host}: #{JSON.stringify(JSON.parse(msg.data), null, 2)}")
+      ws.onclose = () -> env.logger.debug("WS closed for #{host}.")
+
+      return ws
+
     getData: (host, portNumber, attribute) ->
-      new Promise( =>
+      new Promise( (resolve) =>
         if @switchDevices[host]?
           if @switchDevices[host][portNumber]?
             if @switchDevices[host][portNumber]["data"][attribute]?
-              return @switchDevices[host][portNumber]["data"][attribute]
+              resolve(@switchDevices[host][portNumber]["data"][attribute])
 
-        return 0
+        resolve(0)
       )
 
-    changeStateTo: (host, portNumber, state) ->
-      new Promise((resolve) =>
-        request.post(
+    _getChangeStateFunction: (host, portNumber, state) ->
+      if @useWebSockets
+        return new Promise ( (resolve) =>
+          ws = @switchDevices[host].ws
+          update = {
+            sensors: [
+              {
+                output: if state then 1 else 0
+                port: portNumber
+              }
+            ]
+          }
+          env.logger.debug("Sending WebSeocket message to #{host}: #{JSON.stringify(update, null, 2)}")
+          ws.send(JSON.stringify(update))
+          resolve()
+        )
+      else
+        return request.post(
           url: "http://#{host}/sensors/#{portNumber}"
           form:
             output: if state then "1" else "0"
@@ -90,6 +122,12 @@ module.exports = (env) ->
             Cookie: @switchDevices[host].cookie
           followRedirect: false
           simple: false
+        )
+
+    changeStateTo: (host, portNumber, state) ->
+      new Promise((resolve) =>
+        Promise.resolve(
+          @_getChangeStateFunction(host, portNumber, state)
         ).then( =>
           portDevice = @switchDevices[host][portNumber]
 
@@ -100,38 +138,36 @@ module.exports = (env) ->
           resolve()
         ).catch( (error) =>
           env.logger.error("Error while updating the state to #{state}: #{error}")
-          @switchDevices[host].authenticated = false
+          @switchDevices[host].cookie = null
         )
       )
 
 
-    update: () ->
-      #env.logger.debug("Switchdevices: #{JSON.stringify(@switchDevices, null, 2)}")
-      new Promise (resolve) =>
-          for host, data of @switchDevices
-            env.logger.debug("Update : #{host}")
-            @_updateHost(host, data) 
+    update: () -> Promise.all(@_updateHost(host, data) for host, data of @switchDevices)
 
     _updateHost: (host, data) ->
-      env.logger.debug("Updating host: #{host}, authenticated: #{data.authenticated}")
-      new Promise( =>
+      env.logger.debug("Updating host: #{host}")
+      new Promise( (resolve) =>
         @_getSessionId(host, data)
           .then(@_login(host, data))
-          .then(data.authenticated = true)
           .then(@_updateSensorData(host, data))
           .catch( (error) =>
-            data.authenticated = false
+            data.cookie = null
             env.logger.error("Error while updating host: #{error}")
           )
+        resolve()
       )
 
     
     _getSessionId: (host, data) ->
       new Promise( =>
         env.logger.debug("_getSessionId Host: #{host}")
-        if not data.cookie? or not data.authenticated?
-          data.cookie = "AIROS_SESSIONID=#{@_generateSessionId()}"
+        if not data.cookie?
+          data.cookie = @_generateSessionId()
+          data.authenticated = false
           env.logger.debug("Generated cookie for #{host}: #{data.cookie}")
+        else
+          env.logger.debug("Cookie for host #{host} already generated: #{data.cookie}")
       )
 
     _generateSessionId: () ->
@@ -142,29 +178,42 @@ module.exports = (env) ->
       for i in [1..32]
         text += possible.charAt Math.floor(Math.random() * possible.length)
 
-      #return text
-      return "11111111111111111111111111111111"
+      return text
 
     _login: (host, data) ->
-      if not data.authenticated
-        env.logger.debug("Login, host: #{host}, cookie: #{data.cookie}")
-        request.post(
-          url: "http://#{host}/login.cgi"
-          form:
-            username: @username
-            password: @password
-          headers:
-            Cookie: data.cookie
-          followRedirect: false
-          simple: false
-        )
+      new Promise( (resolve) =>
+        if not data.authenticated
+          env.logger.debug("Login, host: #{host}, cookie: #{data.cookie}")
+          request.post(
+            url: "http://#{host}/login.cgi"
+            form:
+              username: @username
+              password: @password
+            headers:
+              Cookie: "AIROS_SESSIONID=#{data.cookie}"
+            followRedirect: false
+            simple: false
+          ).then( =>
+            env.logger.debug("Login successful for host #{host}.")
+            data.authenticated = true
+            if @useWebSockets
+              data.ws = @createWebSocket(host, data.cookie)
+
+            resolve()
+          ).catch( (error) =>
+            env.logger.error("Error while logging in: #{error}")
+          )
+        else
+          env.logger.debug("Already authenticated for host #{host}, skipping login.")
+          resolve()
+      )
 
     _updateSensorData: (host, data) ->
       env.logger.debug("Update sensor data, host: #{host}, cookie: #{data.cookie}")
       request.get(
         url: "http://#{host}/sensors"
         headers:
-          Cookie: data.cookie
+          Cookie: "AIROS_SESSIONID=#{data.cookie}"
         followRedirect: false
         simple: false
       )
