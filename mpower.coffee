@@ -130,7 +130,7 @@ module.exports = (env) ->
           env.logger.debug("Sending WebSocket message to #{host}: #{JSON.stringify(update, null, 2)}")
           ws.send(JSON.stringify(update))
 
-          portDevice = @switchDevices[host][portNumber]
+          portDevice = @switchDevices[host].ports[portNumber]
 
           if portDevice?
             portDevice.data.output = if state then 1 else 0
