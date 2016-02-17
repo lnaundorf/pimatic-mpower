@@ -181,7 +181,12 @@ module.exports = (env) ->
 
     _updateSensorData: (host, webSocketMessage) ->
       data = @switchDevices[host]
-      jsonData = JSON.parse(webSocketMessage.data)
+      jsonData = null
+      try
+        jsonData = JSON.parse(webSocketMessage.data)
+      catch error
+        env.logger.error("Error while parsing WebSocket message for #{host}: #{error}")
+        return
       #env.logger.debug("Update sensor data for #{host}, message: #{JSON.stringify(jsonData, null, 2)}")
 
       for portData in jsonData.sensors
