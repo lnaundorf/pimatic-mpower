@@ -10,4 +10,8 @@ module.exports = {
       description: "The password for login"
       type: "string"
       default: "ubnt"
+    intervall:
+      description: "The update intervall in milliseconds"
+      type: "number"
+      default: 5000
 }

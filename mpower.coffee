@@ -41,6 +41,7 @@ module.exports = (env) ->
     init: (app, @framework, @config) =>
       @username = @config.username
       @password = @config.password
+      @intervall = @config.intervall
 
       @switchDevices = {}
 
@@ -69,6 +70,7 @@ module.exports = (env) ->
       @switchDevices[port.host].ports[port.portNumber] = {
         data: {}
         device: port.device
+        lastUpdated: null
       }
 
       if port.lastState?
@@ -197,13 +199,16 @@ module.exports = (env) ->
           device = data.ports[portData.port].device
 
           if device?
-            # The "output" attribute should be mapped to the "state" attribute
-            device.emit("state", portData.output)
-            device.emit("power", portData.power)
-            device.emit("current", portData.current)
-            device.emit("voltage", portData.voltage)
-            device.emit("powerfactor", portData.powerfactor)
-            device.emit("energy", portData.energy)
+              now = Date.now()
+              if not device.lastUpdated? or now - device.lastUpdated >= @intervall
+                device.lastUpdated = now
+                # The "output" attribute should be mapped to the "state" attribute
+                device.emit("state", portData.output)
+                device.emit("power", portData.power)
+                device.emit("current", portData.current)
+                device.emit("voltage", portData.voltage)
+                device.emit("powerfactor", portData.powerfactor)
+                device.emit("energy", portData.energy)
 
   class MPowerSwitch extends env.devices.PowerSwitch
   
