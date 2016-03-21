@@ -20,8 +20,10 @@ module.exports = (env) ->
   # Require the [cassert library](https://github.com/rhoot/cassert).
   assert = env.require 'cassert'
 
+  # Require the request-promise library for the login to the mpower device
   request = require 'request-promise'
 
+  # Require the W3CWebsocket library for the communication to the mpower device
   W3CWebSocket = require('websocket').w3cwebsocket
 
   # ###MyPlugin class
@@ -187,7 +189,7 @@ module.exports = (env) ->
       try
         jsonData = JSON.parse(webSocketMessage.data)
       catch error
-        env.logger.error("Error while parsing WebSocket message for #{host}: #{error}")
+        env.logger.warn("Error while parsing WebSocket message for #{host}: #{error}")
         return
       #env.logger.debug("Update sensor data for #{host}, message: #{JSON.stringify(jsonData, null, 2)}")
 
@@ -202,7 +204,7 @@ module.exports = (env) ->
               now = Date.now()
               if not device.lastUpdated? or now - device.lastUpdated >= @intervall
                 device.lastUpdated = now
-                # The "output" attribute should be mapped to the "state" attribute
+                # The "output" attribute is mapped to the "state" attribute
                 device.emit("state", portData.output)
                 device.emit("power", portData.power)
                 device.emit("current", portData.current)
