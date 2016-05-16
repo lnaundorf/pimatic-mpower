@@ -24,7 +24,7 @@ module.exports = (env) ->
   request = require 'request-promise'
 
   # Require the W3CWebsocket library for the communication to the mpower device
-  W3CWebSocket = require('websocket').w3cwebsocket
+  WebSocket = require('websocket').w3cwebsocket
 
   # ###MyPlugin class
   # Create a class that extends the Plugin class and implements the following functions:
@@ -44,8 +44,20 @@ module.exports = (env) ->
       @username = @config.username
       @password = @config.password
       @intervall = @config.intervall
+      # Retry intervall for webSocket reconnect is 5000ms
+      @wsRetryInterval = 5000
+      # Check every 20 seconds whether a websocket is still connected
+      @wsCheckConnectedInterval = 20000
 
-      @switchDevices = {}
+      # holds the data of the physical mPower switch devices
+      @physicalDevicesData = {}
+
+      # Maps a deviceId to the corresponding ports of a switch device
+      @deviceMapping = {}
+
+      # Maps ports to the corresponding deviceIds
+      @portMapping = {}
+
 
       deviceConfigDef = require("./device-config-schema")
 
@@ -55,37 +67,54 @@ module.exports = (env) ->
       })
 
 
-    addPort: (port) ->
-      env.logger.debug("Add port: #{port.host} --> #{port.portNumber}")
+    addDevice: (deviceDescription) ->
+      env.logger.debug("Add device: #{deviceDescription.host} --> #{deviceDescription.ports}")
       newDevice = false
-      dev = @switchDevices[port.host]
-      if not dev
+      if not @physicalDevicesData[deviceDescription.host]?
         newDevice = true
-        newHost = {
+
+        @physicalDevicesData[deviceDescription.host] = {
           ports: {}
           cookie: null
           ws: null
         }
 
-        @switchDevices[port.host] = newHost
-
-      @switchDevices[port.host].ports[port.portNumber] = {
-        data: {}
-        device: port.device
-        lastUpdated: null
+      # Add the device to the deviceMapping
+      @deviceMapping[deviceDescription.id] = {
+        device: deviceDescription.device
+        host: deviceDescription.host
+        ports: deviceDescription.ports
       }
 
-      if port.lastState?
-        @_restoreLastState(port.host, port.portNumber, port.lastState)
-        #env.logger.debug("Data: #{JSON.stringify(@switchDevices[port.host].ports[port.portNumber].data, null, 2)}")
+      # Add the device to the portMapping
+      if not @portMapping[deviceDescription.host]?
+        @portMapping[deviceDescription.host] = {}
+
+      portsToAdd = deviceDescription.ports
+
+      if not portsToAdd.length
+        # The port '0' corresponds to all ports of a device
+        portsToAdd = [0]
+
+      for port in portsToAdd
+        if not @portMapping[deviceDescription.host][port]?
+          env.logger.debug("Add physical device port #{deviceDescription.host}: #{port}")
+          @portMapping[deviceDescription.host][port] = []
+
+        @portMapping[deviceDescription.host][port].push(deviceDescription.id)
+
+      # TODO: Restore last state for multiple ports?
+      #if deviceDescription.lastState?
+      #  @_restoreLastState(deviceDescription.host, port.portNumber, port.lastState)
+      #  #env.logger.debug("Data: #{JSON.stringify(@physicalDevicesData[port.host].ports[port.portNumber].data, null, 2)}")
 
       if newDevice
-        @_initSwitchDevice(port.host)
+        @_initSwitchDevice(deviceDescription.host)
 
     _restoreLastState: (host, portNumber, lastState) =>
       #env.logger.debug("Restore last state of #{host}, port #{portNumber}: #{JSON.stringify(lastState, null, 2)}")
 
-      port = @switchDevices[host].ports[portNumber]
+      port = @physicalDevicesData[host].ports[portNumber]
 
       for property, state of lastState
         # Only use data if it is not older than 1 hour
@@ -96,56 +125,81 @@ module.exports = (env) ->
 
     createWebSocket: (host, data) =>
       env.logger.debug("Creating WebSocket for host #{host}")
-      ws = new W3CWebSocket("ws://#{host}:7681/?c=#{data.cookie}", "mfi-protocol")
-      ws.onopen = () ->
+      ws = new WebSocket("ws://#{host}:7681/?c=#{data.cookie}", "mfi-protocol")
+      ws.onopen = () =>
+        env.logger.debug("WebSocket opened for #{host}.")
         ws.send(JSON.stringify({
           time: 10
         }))
+        if data.checkConnectedId
+          env.logger.debug("Clear Interval for host #{host}.")
+          clearInterval data.checkConnectedId
+        data.checkConnectedId = setInterval( =>
+          now = Date.now()
+          env.logger.debug("Check WebSocket for #{host}. Now: #{now}, lastReceivedMessage: #{data.lastMessageReceived}.")
+          # If no message was received in the last interval close the WebSocket
+          if data.ws and data.ws.readyState == 1 and (not data.lastMessageReceived or now - data.lastMessageReceived >= @wsCheckConnectedInterval)
+            env.logger.info("No message received in the last #{@wsCheckConnectedInterval} ms. Reconnect webSocket for #{host}.")
+            data.ws.onclose = null
+            data.ws.close()
+            data.ws = null
+            @_initSwitchDevice(host)
+        , @wsCheckConnectedInterval)
+        env.logger.debug("#{data.checkConnectedId}")
+
       ws.onmessage = (msg) => @_updateSensorData(host, msg)
-      ws.onclose = () -> env.logger.debug("WS closed for #{host}.")
+      ws.onclose = () =>
+        env.logger.info("WS closed for #{host}. Trying to reconnect.")
+        # reconnect the WebSocket
+        @_initSwitchDevice(host)
+      ws.onerror = () -> env.logger.warn("Error for webSocket for #{host}.")
 
       data.ws = ws
 
-    getData: (host, portNumber, attribute) ->
-      new Promise( (resolve) =>
-        if @switchDevices[host]?
-          if @switchDevices[host].ports[portNumber]?
-            if @switchDevices[host].ports[portNumber].data[attribute]?
-              resolve(@switchDevices[host].ports[portNumber].data[attribute])
+    getData: (deviceId, attribute) ->
+      new Promise( (resolve) => resolve(@_getUpdatedDeviceData(deviceId, [attribute])))
 
-        resolve(0)
-      )
-
-    changeStateTo: (host, portNumber, state) ->
+    changeStateTo: (deviceId, state) ->
       new Promise((resolve) =>
-        ws = @switchDevices[host].ws
+        deviceDescription = @deviceMapping[deviceId]
+
+        host = deviceDescription.host
+        ws = @physicalDevicesData[host].ws
 
         if not ws?
           env.logger.error("No WebSocket available for #{host}.")
         else
-          update = {
-            sensors: [
-              {
-                output: if state then 1 else 0
-                port: portNumber
-              }
-            ]
-          }
-          env.logger.debug("Sending WebSocket message to #{host}: #{JSON.stringify(update, null, 2)}")
-          ws.send(JSON.stringify(update))
+          portsToIterate = deviceDescription.ports
 
-          portDevice = @switchDevices[host].ports[portNumber]
+          if not portsToIterate.length
+            portsToIterate = Object.keys(@physicalDevicesData[host].ports)
 
-          if portDevice?
-            portDevice.data.output = if state then 1 else 0
-            portDevice.device.emit("state", state)
+          for portNumber in portsToIterate
+            update = {
+              sensors: [
+                {
+                  output: if state then 1 else 0
+                  port: portNumber
+                }
+              ]
+            }
+            env.logger.debug("Sending WebSocket message to #{host}: #{JSON.stringify(update, null, 2)}")
+            ws.send(JSON.stringify(update))
+
+            portDevice = @physicalDevicesData[host].ports[portNumber]
+
+            if portDevice?
+              portDevice.data.output = if state then 1 else 0
+
+          # TODO: Emit new data for other devices that use the same port
+          deviceDescription.device.emit("state", state)
 
         resolve()
       ).catch( (error) =>
         env.logger.error("Error while updating the state to #{state}: #{error}")
         # create new cookie and try again to login
         @_initSwitchDevice(host)
-        reject()
+        Promise.reject()
       )
 
     _generateSessionId: () ->
@@ -159,7 +213,7 @@ module.exports = (env) ->
       return text
 
     _initSwitchDevice: (host) ->
-      data = @switchDevices[host]
+      data = @physicalDevicesData[host]
       return new Promise( (resolve, reject) =>
         data.cookie = @_generateSessionId()
         env.logger.debug("Login, host: #{host}, cookie: #{data.cookie}")
@@ -179,65 +233,119 @@ module.exports = (env) ->
           resolve()
         ).catch( (error) =>
           env.logger.error("Error while logging in for #{host}: #{error}")
-          reject()
+          setTimeout (=> @_initSwitchDevice(host)), @wsRetryInterval
+          #reject()
+          resolve()
         )
       )
 
     _updateSensorData: (host, webSocketMessage) ->
-      data = @switchDevices[host]
+      data = @physicalDevicesData[host]
       jsonData = null
       try
         jsonData = JSON.parse(webSocketMessage.data)
       catch error
         env.logger.warn("Error while parsing WebSocket message for #{host}: #{error}")
+        env.logger.warn(webSocketMessage.data)
         return
       #env.logger.debug("Update sensor data for #{host}, message: #{JSON.stringify(jsonData, null, 2)}")
 
       for portData in jsonData.sensors
-        if data.ports[portData.port]?
-          data.ports[portData.port].data = portData
+        if not data.ports[portData.port]?
+          data.ports[portData.port] = {
+            data: {}
+            lastUpdated: null
+          }
+
+        savedPortData = data.ports[portData.port]
+
+        # Update the data
+        savedPortData.data = portData
+
+        now = Date.now()
+        data.lastMessageReceived = now
+        lastUpdated = savedPortData.lastUpdated
+        if not lastUpdated? or now - lastUpdated >= @intervall
+          savedPortData.lastUpdated = now
 
           # emit the new data to the framework
-          device = data.ports[portData.port].device
+          responsibleDeviceIds = @_getResponsibleDeviceIds(host, portData.port)
 
-          if device?
-              now = Date.now()
-              if not device.lastUpdated? or now - device.lastUpdated >= @intervall
-                device.lastUpdated = now
-                # The "output" attribute is mapped to the "state" attribute
-                device.emit("state", portData.output)
-                device.emit("power", portData.power)
-                device.emit("current", portData.current)
-                device.emit("voltage", portData.voltage)
-                device.emit("powerfactor", portData.powerfactor)
-                device.emit("energy", portData.energy)
+          for devId in responsibleDeviceIds
+            env.logger.debug("Update device: #{devId}")
+            updatedData = @_getUpdatedDeviceData(devId)
+            device = @deviceMapping[devId]?.device
+
+            # Emit the updated data
+            for key, value of updatedData
+              #env.logger.debug("Emit for device #{device.id}: #{key} -> #{value}")
+              device.emit(key, value)
+
+    _getResponsibleDeviceIds: (host, portNumber) ->
+      responsibleDeviceIds = []
+      # Search for all devices that use this port
+      if @portMapping[host]?
+        #env.logger.debug("Portmapping for host #{host}: #{JSON.stringify(@portMapping[host], null, 2)}")
+        deviceIdsAllPorts = @portMapping[host][0] || []
+        deviceIdsPort = @portMapping[host][portNumber] || []
+
+        responsibleDeviceIds = deviceIdsAllPorts.concat(deviceIdsPort)
+        env.logger.debug("Responsible devices for #{host}, port #{portNumber}: #{responsibleDeviceIds}")
+        return responsibleDeviceIds
+      else
+        return []
+
+
+    _getUpdatedDeviceData: (deviceId, properties) ->
+          deviceDescription = @deviceMapping[deviceId]
+          if deviceDescription?
+            hostData = @physicalDevicesData[deviceDescription.host]
+
+            if hostData?
+              propertiesToSum = ["output", "power", "current"]
+              isSinglePort = deviceDescription.ports.length is 1 or Object.keys(hostData.ports).length <= 1
+
+              if isSinglePort
+                propertiesToSum.push("voltage")
+                propertiesToSum.push("powerfactor")
+                propertiesToSum.push("energy")
+
+              computedData = {}
+
+              numberOfPorts = 0
+
+              for portNumber, val of hostData.ports
+                #env.logger.debug("Ports for device #{deviceId}: #{JSON.stringify(deviceDescription.ports, null, 2)}, val: #{JSON.stringify(val.data, null, 2)}")
+                if not deviceDescription.ports.length or parseInt(portNumber, 10) in deviceDescription.ports
+                  hostDataPort = val.data
+                  if hostDataPort?
+                    numberOfPorts++
+                    #env.logger.debug("hostData for port #{portNumber}: #{JSON.stringify(hostDataPort, null, 2)}")
+                    for propName in propertiesToSum
+                      if not properties? or propName in properties
+                        valBase = computedData[propName] || 0
+                        valToSum = hostDataPort[propName] || 0
+                        computedData[propName] = valBase + valToSum
+
+              # The result state should be 1 if all of the part states are 1
+              if "output" of computedData
+                #env.logger.debug("Computed State: #{computedData.output}, number of ports: #{numberOfPorts}.")
+                computedData.state = Math.floor(computedData.output / numberOfPorts)
+
+              #env.logger.debug("Updated device data: #{JSON.stringify(computedData, null, 2)}")
+
+              if properties? and properties.length is 1
+                # If just one property-value is request return just the value
+                return computedData[properties[0]] || 0
+              else
+                # return the computed property object
+                return computedData
 
   class MPowerSwitch extends env.devices.PowerSwitch
-  
-    constructor: (@config, @plugin, lastState) ->
-      @name = @config.name
-      @id = @config.id
-      @host = @config.host
-      @portNumber = @config.portNumber
-      @template = if @config.hideSwitch then "device" else "switch"
 
-      @plugin.addPort {
-        host: @host
-        portNumber: @portNumber
-        device: @
-        lastState: lastState
-      }
-      super()
-
-    attributes:
-      state:
-        description: "The state of the Power switch"
-        type: "boolean"
-        labels: ['on', 'off']
-      power:
-        description: "The current power usage in watts"
-        type: "number"
-        unit: "W"
+    # The additional attributes which can also be enabled by using
+    # the "additionalAttributes" device configuration option
+    allowedAdditionalAttributes:
       current:
         description: "The current in amps"
         type: "number"
@@ -252,22 +360,62 @@ module.exports = (env) ->
       energy:
         description: "The energy"
         type: "number"
+      state:
+        description: "The state of the Power switch"
+        type: "boolean"
+        labels: ['on', 'off']
+
 
     getTemplate: -> Promise.resolve(@template)
 
-    getState: -> @plugin.getData(@host, @portNumber, "output")
+    getState: -> @plugin.getData(@id, "state")
 
-    getPower: -> @plugin.getData(@host, @portNumber, "power")
+    getPower: -> @plugin.getData(@id, "power")
 
-    getCurrent: -> @plugin.getData(@host, @portNumber, "current")
+    changeStateTo: (state) -> @plugin.changeStateTo(@id, state)
 
-    getVoltage: -> @plugin.getData(@host, @portNumber, "voltage")
+    constructor: (@config, @plugin, lastState) ->
+      @name = @config.name
+      @id = @config.id
 
-    getPowerfactor: -> @plugin.getData(@host, @portNumber, "powerfactor")
+      ports = {} # The empty array corresponds to all ports of a device
+      if @config.ports.length > 0
+        ports = @config.ports
+      else if @config.portNumber != 0
+        ports = [@config.portNumber]
 
-    getEnergy: -> @plugin.getData(@host, @portNumber, "energy")
+      @template = if @config.hideSwitch then "device" else "switch"
 
-    changeStateTo: (state) -> @plugin.changeStateTo(@host, @portNumber, state)
+      # Configure the available attributes of the device
+
+      # "power" is the default attributes
+      @attributes =
+        power:
+          description: "The current power usage in watts"
+          type: "number"
+          unit: "W"
+
+      # Also show the 'state' if the switch should not be hidden
+      if not @config.hideSwitch
+        @attributes['state'] = @allowedAdditionalAttributes['state']
+
+      # Create getters for the additional attributes
+      for attributeName in @config.additionalAttributes
+        if attributeName of @allowedAdditionalAttributes
+          env.logger.debug("Adding additional attribute: #{attributeName}")
+          @_createGetter attributeName, ( => @plugin.getData(@id, attributeName))
+          @attributes[attributeName] = @allowedAdditionalAttributes[attributeName]
+        else
+          env.logger.error("Ignore unknown additional attribute: #{attributeName}")
+
+      @plugin.addDevice {
+        id: @id
+        host: @config.host
+        ports: ports
+        device: @
+        lastState: lastState
+      }
+      super()
 
 
   # ###Finally

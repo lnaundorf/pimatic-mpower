@@ -6,11 +6,20 @@ module.exports ={
     extensions: ["xLink", "xAttributeOptions"]
     properties:
       host:
-        description: "Hostname or IP address of the mPower device"
+        description: "Hostname or IP address of the mPower outlet"
         type: "string"
       portNumber:
-        description: "The port number of the mPower device"
+        description: "The port number of the mPower outlet"
         type: "number"
+        default: 0
+      ports:
+        description: "The ports for this mPower outlet. An empty array corresponds to all ports"
+        type: "array"
+        default: []
+      additionalAttributes:
+        description: "The additional attributes of the mPower outlet"
+        type: "array"
+        default: []
       hideSwitch:
         description: "If the switch should be hidden in the GUI"
         type: "boolean"
